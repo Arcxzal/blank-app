@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-
+import matplotlib as plt    
+import seaborn as sns
 
 main_page = st.Page("main_page.py", title="Main Page", icon="🎈")
 page_2 = st.Page("page_2.py", title="Page 2", icon="❄️")
