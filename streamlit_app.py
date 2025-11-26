@@ -12,3 +12,5 @@ pg = st.navigation([main_page, page_2, page_3])
 
 # Run the selected page
 pg.run()
+
+import numpy as np
