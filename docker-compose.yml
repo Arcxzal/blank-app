@@ -1,0 +1,23 @@
+version: '3.8'
+services:
+  backend:
+    build: ./backend
+    ports:
+      - '8000:8000'
+    environment:
+      - DATABASE_URL=sqlite:///./data.db
+      - CORS_ORIGINS=*
+    volumes:
+      - ./backend/data.db:/app/data.db
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: streamlit run /app/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - '8501:8501'
+    environment:
+      - API_URL=http://backend:8000/api
+docker-compose up --build

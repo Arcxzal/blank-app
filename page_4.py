@@ -30,68 +30,51 @@ GRID_SHAPE = (3, 4)  # rows x cols for plotting (some empty cells allowed)
 # Utilities
 # -----------------------
 def fetch_readings(api_url: str, limit: int = 1000) -> pd.DataFrame:
-    """Fetch readings from backend. Accepts two possible formats:
-       1) Each reading is a row with 'device_id', 'sensor', 'voltage', 'created_at' (individual sensor rows)
-       2) Each reading is a row with 'device_id', 'values' (array of sensor voltages), 'created_at'
-    Returns a DataFrame with columns: created_at (datetime), device_id, sensor, voltage
     """
-    url = f"{api_url.rstrip('/')}/readings?limit={limit}"
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    if not data:
-        return pd.DataFrame(columns=["created_at", "device_id", "sensor", "voltage"])
+    MOCK DATA VERSION.
+    Generates synthetic sensor data for two devices:
+    - esp32_left
+    - esp32_right
 
-    raw = pd.DataFrame(data)
+    Sensors: 0..4 for each device
+    Time range: last 60 seconds sampled at ~20 Hz
+    Step events: simulated pulses in certain sensors
+    """
+    now = pd.Timestamp.utcnow()
+    sample_rate = 20  # Hz ≈ 20 samples per second
+    total_samples = min(limit, sample_rate * 60)  # 60 seconds of data
 
-    # Normalize timestamps
-    if "created_at" in raw.columns:
-        raw["created_at"] = pd.to_datetime(raw["created_at"])
-    elif "timestamp" in raw.columns:
-        raw["created_at"] = pd.to_datetime(raw["timestamp"])
-    else:
-        # fallback: use current time for all (unlikely)
-        raw["created_at"] = pd.Timestamp.utcnow()
+    timestamps = [now - pd.Timedelta(seconds=(total_samples - i) / sample_rate)
+                  for i in range(total_samples)]
 
-    # Case A: already one-row-per-sensor (has 'sensor' and 'voltage' columns)
-    if {"sensor", "voltage", "device_id"}.issubset(raw.columns):
-        df = raw[["created_at", "device_id", "sensor", "voltage"]].copy()
-        df["sensor"] = df["sensor"].astype(int)
-        return df.sort_values("created_at")
+    devices = ["esp32_left", "esp32_right"]
+    rows = []
 
-    # Case B: each row has 'values' array (list of sensors)
-    if "values" in raw.columns:
-        rows = []
-        for _, row in raw.iterrows():
-            device = row.get("device_id", "unknown")
-            ts = row["created_at"]
-            values = row["values"]
-            # values may be list-like; guard
-            try:
-                iterable = list(values)
-            except Exception:
-                continue
-            for si, val in enumerate(iterable):
-                rows.append({"created_at": ts, "device_id": device, "sensor": int(si), "voltage": float(val)})
-        df = pd.DataFrame(rows)
-        return df.sort_values("created_at")
+    for device in devices:
+        # base signal pattern differs left/right slightly
+        base_offset = 20 if device == "esp32_left" else 25
 
-    # Case C: some other format (try flattening arrays inside columns)
-    # Attempt to expand any column that looks like a list
-    for col in raw.columns:
-        if raw[col].apply(lambda x: isinstance(x, list)).any():
-            # expand
-            rows = []
-            for _, row in raw.iterrows():
-                device = row.get("device_id", "unknown")
-                ts = row["created_at"]
-                arr = row[col]
-                if not isinstance(arr, list):
-                    continue
-                for si, val in enumerate(arr):
-                    rows.append({"created_at": ts, "device_id": device, "sensor": int(si), "voltage": float(val)})
-            df = pd.DataFrame(rows)
-            return df.sort_values("created_at")
+        # create pseudo walking signal
+        step_period = 0.6 if device == "esp32_left" else 0.7
+        step_wave = np.sin(np.linspace(0, total_samples * (1 / step_period), total_samples))
+        step_wave = np.maximum(step_wave, 0)  # only rising part = pressure
+
+        for sensor in range(5):
+            # each sensor has slightly different scale
+            sensor_gain = 8 + sensor * 3
+            signal = base_offset + sensor_gain * step_wave + np.random.normal(0, 1, total_samples)
+
+            for i in range(total_samples):
+                rows.append({
+                    "created_at": timestamps[i],
+                    "device_id": device,
+                    "sensor": sensor,
+                    "voltage": float(max(0, signal[i]))
+                })
+
+    df = pd.DataFrame(rows)
+    return df.sort_values("created_at")
+
 
     # If we get here, return empty
     return pd.DataFrame(columns=["created_at", "device_id", "sensor", "voltage"])
@@ -296,7 +279,7 @@ with left_col:
             z=grid,
             x=list(range(grid.shape[1])),
             y=list(range(grid.shape[0])),
-            colorbar=dict(title="Pressure"),
+            colorbar=dict(title="Pressure"),s
             zmin=np.nanmin(grid) if np.isfinite(np.nanmin(grid)) else 0,
             zmax=np.nanmax(grid) if np.isfinite(np.nanmax(grid)) else 1,
             hovertemplate="row=%{y}, col=%{x}, value=%{z}<extra></extra>"
