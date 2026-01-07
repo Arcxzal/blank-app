@@ -279,7 +279,7 @@ with left_col:
             z=grid,
             x=list(range(grid.shape[1])),
             y=list(range(grid.shape[0])),
-            colorbar=dict(title="Pressure"),s
+            colorbar=dict(title="Pressure"),
             zmin=np.nanmin(grid) if np.isfinite(np.nanmin(grid)) else 0,
             zmax=np.nanmax(grid) if np.isfinite(np.nanmax(grid)) else 1,
             hovertemplate="row=%{y}, col=%{x}, value=%{z}<extra></extra>"

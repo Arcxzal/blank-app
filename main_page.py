@@ -11,7 +11,7 @@ import streamlit as st
 # ---------------------------
 
 # Example: URL of your cloud endpoint or storage gateway
-CLOUD_DATA_URL = "https://example.com/api/data"  # change this to your real URL
+CLOUD_DATA_URL = "http://127.0.0.1:8000/api/readings"  # change this to your real URL
 
 REFRESH_INTERVAL_SECONDS = 30  # how often to auto-refresh the chart
 

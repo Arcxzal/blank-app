@@ -1,16 +1,17 @@
 # backend/models.py
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, Float, String, DateTime
 from sqlalchemy.sql import func
 from .database import Base
 
-
-class Reading(Base):
-    __tablename__ = "readings"
+class PressureSample(Base):
+    __tablename__ = "pressure_samples"
 
     id = Column(Integer, primary_key=True, index=True)
     device_id = Column(String, index=True)
-    sensor = Column(Integer, index=True)
+    timestamp = Column(DateTime)
+    big_toe = Column(Float)
+    pinky_toe = Column(Float)
+    meta_out = Column(Float)
+    meta_in = Column(Float)
+    heel = Column(Float)
     mux = Column(Integer, nullable=True)
-    channel = Column(Integer, nullable=True)
-    voltage = Column(Float)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())

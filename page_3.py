@@ -13,7 +13,7 @@ import streamlit as st
 # -----------------------
 # Configuration / Defaults
 # -----------------------
-DEFAULT_API = os.getenv("API_URL", "http://localhost:8000/api")
+DEFAULT_API = os.getenv("API_URL", "http://localhost:8000/api/readings")
 SENSOR_COUNT_PER_FOOT = 5
 # Map sensor index (0..4) to a small grid coordinate (row, col) for heatmap
 # Customize this mapping to match your physical sensor layout.
@@ -35,7 +35,7 @@ def fetch_readings(api_url: str, limit: int = 1000) -> pd.DataFrame:
        2) Each reading is a row with 'device_id', 'values' (array of sensor voltages), 'created_at'
     Returns a DataFrame with columns: created_at (datetime), device_id, sensor, voltage
     """
-    url = f"{api_url.rstrip('/')}/readings?limit={limit}"
+    url = api_url
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     data = r.json()
