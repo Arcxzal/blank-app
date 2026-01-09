@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
+import numpy as np
+from scipy.signal import savgol_filter
+import matplotlib.pyplot as plt
 
 
 main_page = st.Page("main_page.py", title="Main Page", icon="🎈")
