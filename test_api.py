@@ -25,7 +25,7 @@ for entry in data:
 
 df = pd.DataFrame(records)
 
-# 🔑 FORCE proper datetime dtype
+# FORCE proper datetime dtype
 df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
 
 # Optional: drop bad rows
