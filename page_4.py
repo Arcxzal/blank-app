@@ -1,365 +1,193 @@
-# streamlit_app.py
-import os
-import time
-from typing import Dict, List, Tuple
+# page_4.py - Data Exploration and Metrics
 
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import requests
 import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+import requests
+from datetime import datetime
+from patient_utils import load_patient_data, is_demo_patient, get_patient_display_name
+from mock_data_generator import generate_mock_data
 
-# -----------------------
-# Configuration / Defaults
-# -----------------------
-DEFAULT_API = os.getenv("API_URL", "http://localhost:8000/api")
-SENSOR_COUNT_PER_FOOT = 5
-# Map sensor index (0..4) to a small grid coordinate (row, col) for heatmap
-# Customize this mapping to match your physical sensor layout.
-SENSOR_TO_GRID = {
-    0: (0, 1),  # toe / fore
-    1: (0, 2),
-    2: (1, 1),  # center
-    3: (1, 2),
-    4: (2, 1),  # heel
-}
-GRID_SHAPE = (3, 4)  # rows x cols for plotting (some empty cells allowed)
+# ---------------------------
+# Configuration
+# ---------------------------
 
-# -----------------------
-# Utilities
-# -----------------------
-def fetch_readings(api_url: str, limit: int = 1000) -> pd.DataFrame:
-    """
-    MOCK DATA VERSION.
-    Generates synthetic sensor data for two devices:
-    - esp32_left
-    - esp32_right
-
-    Sensors: 0..4 for each device
-    Time range: last 60 seconds sampled at ~20 Hz
-    Step events: simulated pulses in certain sensors
-    """
-    now = pd.Timestamp.utcnow()
-    sample_rate = 20  # Hz ≈ 20 samples per second
-    total_samples = min(limit, sample_rate * 60)  # 60 seconds of data
-
-    timestamps = [now - pd.Timedelta(seconds=(total_samples - i) / sample_rate)
-                  for i in range(total_samples)]
-
-    devices = ["esp32_left", "esp32_right"]
-    rows = []
-
-    for device in devices:
-        # base signal pattern differs left/right slightly
-        base_offset = 20 if device == "esp32_left" else 25
-
-        # create pseudo walking signal
-        step_period = 0.6 if device == "esp32_left" else 0.7
-        step_wave = np.sin(np.linspace(0, total_samples * (1 / step_period), total_samples))
-        step_wave = np.maximum(step_wave, 0)  # only rising part = pressure
-
-        for sensor in range(5):
-            # each sensor has slightly different scale
-            sensor_gain = 8 + sensor * 3
-            signal = base_offset + sensor_gain * step_wave + np.random.normal(0, 1, total_samples)
-
-            for i in range(total_samples):
-                rows.append({
-                    "created_at": timestamps[i],
-                    "device_id": device,
-                    "sensor": sensor,
-                    "voltage": float(max(0, signal[i]))
-                })
-
-    df = pd.DataFrame(rows)
-    return df.sort_values("created_at")
+CLOUD_DATA_URL = "https://silver-space-umbrella-4j5q5647xwj735gx-8000.app.github.dev/api/readings"
 
 
-    # If we get here, return empty
-    return pd.DataFrame(columns=["created_at", "device_id", "sensor", "voltage"])
+# ---------------------------
+# Data Loading
+# ---------------------------
+
+@st.cache_data(ttl=2)
+def load_data_from_api() -> pd.DataFrame:
+    response = requests.get(CLOUD_DATA_URL, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    
+    records = []
+    for entry in data:
+        timestamp = entry.get("timestamp")
+        if not timestamp:
+            continue
+        pressures = entry.get("pressures", {})
+        record = {
+            "timestamp": timestamp,
+            "bigToe": pressures.get("bigToe", 0),
+            "pinkyToe": pressures.get("pinkyToe", 0),
+            "metaOut": pressures.get("metaOut", 0),
+            "metaIn": pressures.get("metaIn", 0),
+            "heel": pressures.get("heel", 0),
+            "bigToe_L": pressures.get("bigToe_L", 0),
+            "pinkyToe_L": pressures.get("pinkyToe_L", 0),
+            "metaOut_L": pressures.get("metaOut_L", 0),
+            "metaIn_L": pressures.get("metaIn_L", 0),
+            "heel_L": pressures.get("heel_L", 0),
+        }
+        records.append(record)
+    
+    if not records:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(records)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"])
+    df = df.sort_values("timestamp")
+    return df
 
 
-def pivot_sensors(df: pd.DataFrame) -> pd.DataFrame:
-    """Pivot a sensor-level DataFrame into a time-indexed DataFrame where each sensor is a column.
-       df: columns [created_at, device_id, sensor, voltage]
-       Returns a dict of dataframes keyed by device_id
-    """
+def load_mock_data() -> pd.DataFrame:
+    start_date = datetime.now() - pd.Timedelta(hours=1)  # Start from 1 hour ago
+    rng = pd.date_range(start_date, periods=300, freq="10s")
+    df = pd.DataFrame({
+        "timestamp": rng,
+        "bigToe": np.abs(np.sin(np.linspace(0, 30, len(rng))) * 40 + np.random.randn(len(rng)) * 3),
+        "pinkyToe": np.abs(np.sin(np.linspace(0, 25, len(rng))) * 35 + np.random.randn(len(rng)) * 3),
+        "metaOut": np.abs(np.sin(np.linspace(0, 28, len(rng))) * 38 + np.random.randn(len(rng)) * 3),
+        "metaIn": np.abs(np.sin(np.linspace(0, 26, len(rng))) * 36 + np.random.randn(len(rng)) * 3),
+        "heel": np.abs(np.sin(np.linspace(0, 32, len(rng))) * 45 + np.random.randn(len(rng)) * 3),
+        "bigToe_L": np.abs(np.sin(np.linspace(0, 30, len(rng)) + 0.5) * 40 + np.random.randn(len(rng)) * 3),
+        "pinkyToe_L": np.abs(np.sin(np.linspace(0, 25, len(rng)) + 0.5) * 35 + np.random.randn(len(rng)) * 3),
+        "metaOut_L": np.abs(np.sin(np.linspace(0, 28, len(rng)) + 0.5) * 38 + np.random.randn(len(rng)) * 3),
+        "metaIn_L": np.abs(np.sin(np.linspace(0, 26, len(rng)) + 0.5) * 36 + np.random.randn(len(rng)) * 3),
+        "heel_L": np.abs(np.sin(np.linspace(0, 32, len(rng)) + 0.5) * 45 + np.random.randn(len(rng)) * 3),
+    })
+    return df
+
+
+# ---------------------------
+# Main App
+# ---------------------------
+
+def main():
+    # Get selected patient info
+    patient_name = get_patient_display_name()
+    is_demo = is_demo_patient()
+    
+    st.set_page_config(
+        page_title="Data Exploration & Metrics",
+        layout="wide",
+    )
+
+    st.title("📋 Data Exploration & Metrics")
+    patient_badge = "🎭 Demo Patient" if is_demo else f"📡 {patient_name}"
+    st.caption(f"Viewing data for: **{patient_badge}**")
+    st.write("Explore raw data and view comprehensive metrics and statistics.")
+
+    # Sidebar
+    st.sidebar.header("Settings")
+    rows_to_display = st.sidebar.slider("Rows to display", min_value=10, max_value=500, value=50)
+
+    # Load data using helper function
+    try:
+        df = load_patient_data(num_cycles=20, cadence=115)
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        df = pd.DataFrame()
+
     if df.empty:
-        return {}
+        st.warning("⚠️ No data available. Please enable mock data or check your connection.")
+        return
 
-    # ensure proper types
-    df = df.copy()
-    df["sensor"] = df["sensor"].astype(int)
-    df["voltage"] = df["voltage"].astype(float)
-    devices = {}
-    for device, g in df.groupby("device_id"):
-        # pivot: index created_at, columns sensor
-        try:
-            p = g.pivot_table(index="created_at", columns="sensor", values="voltage", aggfunc="mean")
-            # sort columns
-            p = p.reindex(columns=sorted(p.columns), fill_value=np.nan)
-            devices[device] = p
-        except Exception:
-            # fallback: build from scratch
-            devices[device] = pd.DataFrame()
-    return devices
+    # ---------------------------
+    # Data Overview
+    # ---------------------------
+    
+    st.header("📊 Data Overview")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("Total Records", len(df))
+    with col2:
+        st.metric("Time Span", f"{(df['timestamp'].max() - df['timestamp'].min()).total_seconds():.0f}s")
+    with col3:
+        st.metric("Start Time", df['timestamp'].min().strftime("%H:%M:%S"))
+    with col4:
+        st.metric("End Time", df['timestamp'].max().strftime("%H:%M:%S"))
+    with col5:
+        st.metric("Columns", len(df.columns))
 
+    # ---------------------------
+    # Raw Data Table
+    # ---------------------------
+    
+    st.header("📑 Raw Data")
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.subheader("Pressure Readings Table")
+    with col2:
+        if st.button("📥 Export CSV"):
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name=f"pressure_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+    
+    st.dataframe(df.head(rows_to_display), height=400)
 
-def detect_steps_from_series(series: pd.Series,
-                              threshold: float,
-                              min_interval_s: float = 0.3) -> List[pd.Timestamp]:
-    """Detect step events from a single time series (summed pressure per foot).
-       Returns list of timestamps where step event occurs (simple rising-edge detection).
-       min_interval_s prevents multiple detections very close together.
-    """
-    if series.dropna().empty:
-        return []
-
-    # Ensure series sorted by time and no duplicate index
-    s = series.sort_index().interpolate().ffill().bfill()
-    times = s.index.to_numpy()
-    vals = s.values
-
-    # Detect rising edges: value crosses above threshold and previous is below.
-    above = vals > threshold
-    # rising edges indices
-    rising_idx = np.where(np.logical_and(above, np.concatenate(([False], ~above[:-1]))))[0]
-
-    if rising_idx.size == 0:
-        return []
-
-    # Filter by minimum interval
-    filtered = []
-    last_t = None
-    for idx in rising_idx:
-        t = times[idx]
-        if last_t is None or (t - last_t).astype("timedelta64[ms]") / 1000.0 >= min_interval_s:
-            filtered.append(pd.Timestamp(t))
-            last_t = pd.Timestamp(t)
-    return filtered
-
-
-def compute_gait_metrics_for_foot(ts_df: pd.DataFrame,
-                                  threshold: float) -> Dict:
-    """Given a pivoted DataFrame (index=timestamp, columns=sensor_i),
-       compute gait metrics for that foot."""
-    if ts_df is None or ts_df.empty:
-        return {"steps": 0, "cadence": None, "avg_step_time": None,
-                "avg_stride_time": None, "stance_swing_ratio": None, "peak_pressure": None}
-
-    # Create a summed pressure signal across sensors as a simple foot-level signal
-    summed = ts_df.sum(axis=1)
-    # Detect step events
-    events = detect_steps_from_series(summed, threshold=threshold, min_interval_s=0.3)
-    steps = len(events)
-
-    # Compute step intervals
-    if steps < 2:
-        avg_step_time = None
-        cadence = None
-        avg_stride_time = None
-    else:
-        diffs = np.diff(pd.to_datetime(events).astype(np.int64) / 1e9)  # seconds
-        avg_step_time = float(np.mean(diffs))
-        cadence = 60.0 / avg_step_time if avg_step_time > 0 else None
-        avg_stride_time = avg_step_time * 2
-
-    # stance vs swing: simple occupancy estimate: proportion of samples above threshold
-    stance = (summed > threshold).sum()
-    swing = (summed <= threshold).sum()
-    stance_swing_ratio = float(stance) / float(swing) if swing > 0 else None
-
-    peak_pressure = float(summed.max())
-
-    return {
-        "steps": steps,
-        "cadence": cadence,
-        "avg_step_time": avg_step_time,
-        "avg_stride_time": avg_stride_time,
-        "stance_swing_ratio": stance_swing_ratio,
-        "peak_pressure": peak_pressure,
-        "events": events,
-        "summed_signal": summed
-    }
+    # ---------------------------
+    # Descriptive Statistics
+    # ---------------------------
+    
+    st.header("📈 Descriptive Statistics")
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    stats = df[numeric_cols].describe().T
+    st.dataframe(stats)
 
 
-def build_heatmap_grid(latest_sensor_values: Dict[int, float]) -> np.ndarray:
-    """Given mapping sensor_index->value, produce a GRID_SHAPE numpy array for plotting.
-       Empty cells will be np.nan so Plotly shows them as blank/low."""
-    grid = np.full(GRID_SHAPE, np.nan, dtype=float)
-    for sensor_idx, val in latest_sensor_values.items():
-        if sensor_idx in SENSOR_TO_GRID:
-            r, c = SENSOR_TO_GRID[sensor_idx]
-            # guard bounds
-            if 0 <= r < GRID_SHAPE[0] and 0 <= c < GRID_SHAPE[1]:
-                grid[r, c] = float(val)
-    return grid
+    # ---------------------------
+    # Summary Metrics
+    # ---------------------------
+    
+    st.header("🎯 Summary Metrics")
+    
+    right_total = df[['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']].sum(axis=1)
+    left_total = df[['bigToe_L', 'pinkyToe_L', 'metaOut_L', 'metaIn_L', 'heel_L']].sum(axis=1)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Right Foot Avg", f"{right_total.mean():.1f}")
+    with col2:
+        st.metric("Left Foot Avg", f"{left_total.mean():.1f}")
+    with col3:
+        st.metric("Right Foot Max", f"{right_total.max():.1f}")
+    with col4:
+        st.metric("Left Foot Max", f"{left_total.max():.1f}")
+    
+    # Auto-refresh to keep data updated
+    st.caption(f"Auto-refreshing every 2 seconds.")
+    import time as time_module
+    time_module.sleep(2)
+    st.rerun()
 
 
-# -----------------------
-# Streamlit UI
-# -----------------------
-st.set_page_config(page_title="Gait Pressure Dashboard", layout="wide")
-st.title("Gait Pressure Dashboard (Left / Right)")
-
-# Sidebar controls
-with st.sidebar:
-    api_url = st.text_input("API base URL", value=DEFAULT_API)
-    limit = st.number_input("Max readings to fetch", min_value=50, max_value=20000, value=2000, step=50)
-    time_window_s = st.number_input("Window (seconds) for metrics", min_value=5, max_value=3600, value=60)
-    threshold = st.number_input("Step detection threshold", min_value=0.0, value=10.0, step=1.0)
-    refresh_button = st.button("Refresh data now")
-    st.markdown("---")
-    st.write("Notes:")
-    st.write("- Threshold depends on your sensor range (calibrate).")
-    st.write("- Sensor -> grid mapping in code: SENSOR_TO_GRID.")
-
-# Fetch data
-try:
-    df_raw = fetch_readings(api_url, limit=int(limit))
-except Exception as e:
-    st.error(f"Error fetching data from {api_url}: {e}")
-    st.stop()
-
-if df_raw.empty:
-    st.info("No sensor data available yet.")
-    st.stop()
-
-# Pivot to per-device sensor time series
-devices_ts = pivot_sensors(df_raw)
-
-# Only consider recent time window for real-time metrics
-now = pd.Timestamp.utcnow()
-start_time = now - pd.Timedelta(seconds=int(time_window_s))
-
-# Prepare UI layout
-left_col, right_col = st.columns((2, 1))
-
-# Determine device ids for left and right (assume naming convention)
-device_left = "esp32_left"
-device_right = "esp32_right"
-
-# If those exact ids don't exist, pick first two devices found
-device_ids = list(devices_ts.keys())
-if device_left not in device_ids and device_ids:
-    device_left = device_ids[0]
-if device_right not in device_ids:
-    device_right = device_ids[1] if len(device_ids) > 1 else device_left
-
-# Compute metrics for both feet
-metrics = {}
-for dev, name in [(device_left, "Left"), (device_right, "Right")]:
-    ts_df = devices_ts.get(dev, pd.DataFrame()).copy()
-    if not ts_df.empty:
-        # trim to window
-        ts_recent = ts_df[(ts_df.index >= start_time) & (ts_df.index <= now)]
-    else:
-        ts_recent = pd.DataFrame()
-    metrics[dev] = compute_gait_metrics_for_foot(ts_recent, threshold=threshold)
-
-# -- Left / Right Metrics cards and heatmaps --
-with left_col:
-    st.header(f"Left foot ({device_left}) metrics")
-    left_metrics = metrics.get(device_left, {})
-    st.metric("Steps (window)", left_metrics.get("steps", 0))
-    st.metric("Cadence (spm)", f"{left_metrics.get('cadence'):.1f}" if left_metrics.get("cadence") else "—")
-    st.write(f"Avg step time: {left_metrics.get('avg_step_time'):.2f} s" if left_metrics.get("avg_step_time") else "Avg step time: —")
-    st.write(f"Stride time: {left_metrics.get('avg_stride_time'):.2f} s" if left_metrics.get("avg_stride_time") else "Stride time: —")
-    st.write(f"Stance/Swing ratio: {left_metrics.get('stance_swing_ratio'):.2f}" if left_metrics.get("stance_swing_ratio") else "Stance/Swing ratio: —")
-    st.write(f"Peak pressure: {left_metrics.get('peak_pressure'):.2f}" if left_metrics.get("peak_pressure") else "Peak pressure: —")
-
-    # heatmap: use latest timestamp's sensor values for this device
-    left_ts_full = devices_ts.get(device_left, pd.DataFrame())
-    if not left_ts_full.empty:
-        latest_row = left_ts_full.iloc[-1]
-        latest_vals = {int(col): float(latest_row[col]) for col in latest_row.index if not pd.isna(latest_row[col])}
-        grid = build_heatmap_grid(latest_vals)
-        fig = go.Figure(data=go.Heatmap(
-            z=grid,
-            x=list(range(grid.shape[1])),
-            y=list(range(grid.shape[0])),
-            colorbar=dict(title="Pressure"),
-            zmin=np.nanmin(grid) if np.isfinite(np.nanmin(grid)) else 0,
-            zmax=np.nanmax(grid) if np.isfinite(np.nanmax(grid)) else 1,
-            hovertemplate="row=%{y}, col=%{x}, value=%{z}<extra></extra>"
-        ))
-        fig.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20), yaxis_autorange='reversed')
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.write("No left-foot sensor data yet.")
-
-with right_col:
-    st.header(f"Right foot ({device_right}) metrics")
-    right_metrics = metrics.get(device_right, {})
-    st.metric("Steps (window)", right_metrics.get("steps", 0))
-    st.metric("Cadence (spm)", f"{right_metrics.get('cadence'):.1f}" if right_metrics.get("cadence") else "—")
-    st.write(f"Avg step time: {right_metrics.get('avg_step_time'):.2f} s" if right_metrics.get("avg_step_time") else "Avg step time: —")
-    st.write(f"Stride time: {right_metrics.get('avg_stride_time'):.2f} s" if right_metrics.get("avg_stride_time") else "Stride time: —")
-    st.write(f"Stance/Swing ratio: {right_metrics.get('stance_swing_ratio'):.2f}" if right_metrics.get("stance_swing_ratio") else "Stance/Swing ratio: —")
-    st.write(f"Peak pressure: {right_metrics.get('peak_pressure'):.2f}" if right_metrics.get("peak_pressure") else "Peak pressure: —")
-
-    # right heatmap
-    right_ts_full = devices_ts.get(device_right, pd.DataFrame())
-    if not right_ts_full.empty:
-        latest_row = right_ts_full.iloc[-1]
-        latest_vals = {int(col): float(latest_row[col]) for col in latest_row.index if not pd.isna(latest_row[col])}
-        grid = build_heatmap_grid(latest_vals)
-        fig2 = go.Figure(data=go.Heatmap(
-            z=grid,
-            x=list(range(grid.shape[1])),
-            y=list(range(grid.shape[0])),
-            colorbar=dict(title="Pressure"),
-            zmin=np.nanmin(grid) if np.isfinite(np.nanmin(grid)) else 0,
-            zmax=np.nanmax(grid) if np.isfinite(np.nanmax(grid)) else 1,
-            hovertemplate="row=%{y}, col=%{x}, value=%{z}<extra></extra>"
-        ))
-        fig2.update_layout(height=300, margin=dict(l=20, r=20, t=20, b=20), yaxis_autorange='reversed')
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.write("No right-foot sensor data yet.")
-
-# -- Step event timeline (combined)
-st.subheader("Step event timeline (last window)")
-
-# gather events
-timeline_rows = []
-for dev in [device_left, device_right]:
-    evs = metrics.get(dev, {}).get("events", [])
-    summed = metrics.get(dev, {}).get("summed_signal", pd.Series(dtype=float))
-    for t in evs:
-        timeline_rows.append({"t": t, "device": dev, "pressure": float(summed.get(t, np.nan)) if not summed.empty and t in summed.index else np.nan})
-
-if timeline_rows:
-    tdf = pd.DataFrame(timeline_rows)
-    tdf = tdf.sort_values("t")
-    fig_t = go.Figure()
-    # show summed signals as background lines (if available)
-    for dev in [device_left, device_right]:
-        summed = metrics.get(dev, {}).get("summed_signal", pd.Series(dtype=float))
-        if not summed.empty:
-            fig_t.add_trace(go.Scatter(x=summed.index, y=summed.values, mode="lines", name=f"{dev} summed", opacity=0.3))
-    # add event markers
-    colors = {device_left: "blue", device_right: "red"}
-    for dev in tdf["device"].unique():
-        sub = tdf[tdf["device"] == dev]
-        fig_t.add_trace(go.Scatter(x=sub["t"], y=sub["pressure"], mode="markers", name=f"{dev} steps",
-                                   marker=dict(size=8, color=colors.get(dev, "black"))))
-    fig_t.update_layout(xaxis_title="Time", yaxis_title="Pressure", height=300, margin=dict(t=10, b=30))
-    st.plotly_chart(fig_t, use_container_width=True)
-else:
-    st.write("No step events detected in the selected window.")
-
-# -- Raw recent data table (optional)
-st.subheader("Recent raw sensor samples (per-device)")
-for dev in [device_left, device_right]:
-    st.write(f"Device: {dev}")
-    df_dev = devices_ts.get(dev, pd.DataFrame()).sort_index(ascending=False)
-    if df_dev.empty:
-        st.write("No data")
-    else:
-        st.dataframe(df_dev.head(50))
-
-# Refresh behavior: simple button-driven refresh (user clicks Refresh)
-if refresh_button:
-    st.experimental_rerun()
+if __name__ == "__main__":
+    main()

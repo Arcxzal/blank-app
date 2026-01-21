@@ -8,7 +8,7 @@ FS = 25  # sampling frequency (Hz)
 # Use filtered and normalized data when relative contributions matter (e.g., load distribution, COP, relative pressure analysis).
 
 
-# df_filtered = preprocess_signals(df)
+#df_filtered = preprocess_signals(df)
 # df_norm = normalize_to_percent_load(df_filtered)
 
 # df_filtered["total_load"] = df_filtered[['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']].sum(axis=1)
@@ -16,9 +16,9 @@ FS = 25  # sampling frequency (Hz)
 # heel_strikes, toe_offs = detect_heel_strike_toe_off(df_filtered)
 # metrics = compute_gait_metrics(heel_strikes, toe_offs)
 
-# metrics["stance_times"]
-# metrics["swing_times"]
-# metrics["cadence"]
+#metrics["stance_times"]
+#metrics["swing_times"]
+#metrics["cadence"]
 
 
 # -------------------------------
@@ -43,13 +43,20 @@ def savgol_filter_signal(signal, fs=FS):
 
 def preprocess_signals(df):
     """
-    Input: DataFrame with columns ['timestamp','s1'...'s5']
+    Input: DataFrame with columns for right and left foot sensors
     Output: filtered DataFrame (non-destructive)
     """
     filtered = df.copy()
 
-    for col in ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']:
-        filtered[col] = savgol_filter_signal(filtered[col].values)
+    # Right foot sensors
+    right_cols = ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']
+    # Left foot sensors
+    left_cols = ['bigToe_L', 'pinkyToe_L', 'metaOut_L', 'metaIn_L', 'heel_L']
+    
+    # Process all available columns
+    for col in right_cols + left_cols:
+        if col in filtered.columns:
+            filtered[col] = savgol_filter_signal(filtered[col].values)
 
     return filtered
 
@@ -60,16 +67,30 @@ def preprocess_signals(df):
 def normalize_to_percent_load(df):
     """
     Normalize sensor loads to % of total load per frame.
-    Returns a new DataFrame.
+    Returns a new DataFrame with normalized values for both feet.
     """
-    sensor_cols = ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']
     norm = df.copy()
-
-    total_load = norm[sensor_cols].sum(axis=1, skipna=True)
-    total_load = total_load.replace(0, np.nan)  # avoid divide-by-zero
-
-    for col in sensor_cols:
-        norm[col] = (norm[col] / total_load) * 100.0
+    
+    # Right foot sensors
+    right_cols = ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']
+    # Left foot sensors
+    left_cols = ['bigToe_L', 'pinkyToe_L', 'metaOut_L', 'metaIn_L', 'heel_L']
+    
+    # Normalize right foot
+    right_available = [col for col in right_cols if col in norm.columns]
+    if right_available:
+        total_load_r = norm[right_available].sum(axis=1, skipna=True)
+        total_load_r = total_load_r.replace(0, np.nan)  # avoid divide-by-zero
+        for col in right_available:
+            norm[col] = (norm[col] / total_load_r) * 100.0
+    
+    # Normalize left foot
+    left_available = [col for col in left_cols if col in norm.columns]
+    if left_available:
+        total_load_l = norm[left_available].sum(axis=1, skipna=True)
+        total_load_l = total_load_l.replace(0, np.nan)  # avoid divide-by-zero
+        for col in left_available:
+            norm[col] = (norm[col] / total_load_l) * 100.0
 
     return norm
 
@@ -101,11 +122,38 @@ def detect_steps(total_load, fs=FS):
     return peaks
 
 
+def compute_total_load(df_filtered, foot='right'):
+    """
+    Compute total load for a specific foot.
+    
+    Args:
+        df_filtered: DataFrame with filtered pressure data
+        foot: 'right' or 'left' foot
+    
+    Returns:
+        total_load: array of total load values
+    """
+    if foot.lower() == 'left':
+        sensor_cols = ['bigToe_L', 'pinkyToe_L', 'metaOut_L', 'metaIn_L', 'heel_L']
+    else:  # default to right
+        sensor_cols = ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']
+    
+    # Sum only available columns
+    available_cols = [col for col in sensor_cols if col in df_filtered.columns]
+    
+    if not available_cols:
+        return np.zeros(len(df_filtered))
+    
+    return df_filtered[available_cols].sum(axis=1, skipna=True).values
+
+    return peaks
+
+
 # -------------------------------
 # Heel strike / Toe off detection
 # -------------------------------
 
-def detect_heel_strike_toe_off(df_filtered, fs=FS):
+def detect_heel_strike_toe_off(df_filtered, fs=FS, foot='right'):
     """
     Detect heel-strike and toe-off events from filtered pressure signals.
 
@@ -114,17 +162,35 @@ def detect_heel_strike_toe_off(df_filtered, fs=FS):
     Toe-off:
         - Forefoot load drops below a threshold after stance
 
+    Args:
+        df_filtered: DataFrame with pressure data
+        fs: sampling frequency (Hz)
+        foot: 'right' or 'left' foot
+
     Returns:
         heel_strikes: indices of heel-strike events
         toe_offs: indices of toe-off events
     """
-
-    heel = df_filtered["heel"].values
-    forefoot = (
-        df_filtered["bigToe"].values +
-        df_filtered["metaOut"].values +
-        df_filtered["metaIn"].values
-    )
+    
+    # Select sensors based on foot
+    if foot.lower() == 'left':
+        heel_col = "heel_L"
+        toe_cols = ["bigToe_L", "metaOut_L", "metaIn_L"]
+    else:  # default to right
+        heel_col = "heel"
+        toe_cols = ["bigToe", "metaOut", "metaIn"]
+    
+    # Check if columns exist
+    if heel_col not in df_filtered.columns:
+        return np.array([]), np.array([])
+    
+    heel = df_filtered[heel_col].values
+    
+    # Sum available forefoot sensors
+    forefoot = np.zeros(len(df_filtered))
+    for col in toe_cols:
+        if col in df_filtered.columns:
+            forefoot += df_filtered[col].values
 
     # --- Adaptive thresholds ---
     heel_thresh = 0.15 * np.nanmax(heel)

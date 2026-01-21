@@ -1,161 +1,204 @@
+# home_page.py - Main landing page for the Gait Analysis Dashboard
 
-# dashboard.py
-
-import time
-import requests
-import pandas as pd
 import streamlit as st
+from datetime import datetime
+from patient_utils import get_patient_display_name, is_demo_patient
 
 # ---------------------------
-# Configuration
-# ---------------------------
-
-# Example: URL of your cloud endpoint or storage gateway
-CLOUD_DATA_URL = "http://127.0.0.1:8000/api/readings"  # change this to your real URL
-
-REFRESH_INTERVAL_SECONDS = 30  # how often to auto-refresh the chart
-
-
-# ---------------------------
-# Data loading helpers
-# ---------------------------
-
-def load_data_from_api() -> pd.DataFrame:
-    """
-    Example loader if your data is exposed via a REST API.
-    Expected JSON format:
-    [
-      {"timestamp": "2025-11-26T10:00:00Z", "value": 12.5},
-      {"timestamp": "2025-11-26T10:05:00Z", "value": 13.1},
-      ...
-    ]
-    """
-    response = requests.get(CLOUD_DATA_URL, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-
-    df = pd.DataFrame(data)
-
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp")
-
-    return df
-
-
-def load_mock_data() -> pd.DataFrame:
-    """
-    Fallback / demo loader if you do not have real cloud data yet.
-    It simulates a time series.
-    """
-    import numpy as np
-
-    rng = pd.date_range("2025-11-01", periods=50, freq="H")
-    values = np.cumsum(np.random.randn(len(rng))) + 50
-
-    df = pd.DataFrame({"timestamp": rng, "value": values})
-    return df
-
-
-# ---------------------------
-# Main Streamlit app
+# Page Configuration
 # ---------------------------
 
 def main():
+    # Get selected patient info
+    patient_name = get_patient_display_name()
+    is_demo = is_demo_patient()
+    
     st.set_page_config(
-        page_title="Cloud Data Time Trend Dashboard",
+        page_title="Gait Analysis Dashboard",
         layout="wide",
+        initial_sidebar_state="expanded"
     )
 
-    st.title("Cloud Data Time Trend Dashboard")
-    st.write("This dashboard shows the trend over time for data values collected via the cloud.")
-
-    # Sidebar configuration
-    st.sidebar.header("Settings")
-
-    use_mock = st.sidebar.checkbox(
-        "Use mock data (for testing)",
-        value=True,
-        help="Uncheck this when your real cloud API is ready."
-    )
-
-    auto_refresh = st.sidebar.checkbox(
-        "Auto-refresh",
-        value=True,
-        help=f"Refresh data every {REFRESH_INTERVAL_SECONDS} seconds."
-    )
-
-    # Time range filter
-    time_filter_options = ["All data", "Last 1 hour", "Last 24 hours", "Last 7 days"]
-    time_filter = st.sidebar.selectbox("Time range", time_filter_options)
-
-    # ---------------------------
-    # Data loading
-    # ---------------------------
-    try:
-        if use_mock:
-            df = load_mock_data()
-        else:
-            df = load_data_from_api()
-    except Exception as e:
-        st.error(f"Error loading data from cloud: {e}")
-        st.stop()
-
-    if df.empty:
-        st.warning("No data available.")
-        st.stop()
+    # Custom styling
+    st.markdown("""
+        <style>
+        .header-title {
+            font-size: 3.5em;
+            font-weight: bold;
+            color: #0072B2;
+            margin-bottom: 0.5em;
+        }
+        .subtitle {
+            font-size: 1.3em;
+            color: #555;
+            margin-bottom: 2em;
+        }
+        .feature-box {
+            background-color: #f0f2f6;
+            padding: 1.5em;
+            border-radius: 0.5em;
+            margin: 1em 0;
+            border-left: 4px solid #0072B2;
+        }
+        .stat-card {
+            background-color: #ffffff;
+            padding: 1.5em;
+            border-radius: 0.5em;
+            border: 1px solid #ddd;
+            text-align: center;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
     # ---------------------------
-    # Data filtering
-    # ---------------------------
-    df = df.sort_values("timestamp")
-    df = df.set_index("timestamp")
-
-    # Apply time filter
-    if time_filter != "All data":
-        max_ts = df.index.max()
-        if time_filter == "Last 1 hour":
-            min_ts = max_ts - pd.Timedelta(hours=1)
-        elif time_filter == "Last 24 hours":
-            min_ts = max_ts - pd.Timedelta(hours=24)
-        elif time_filter == "Last 7 days":
-            min_ts = max_ts - pd.Timedelta(days=7)
-        df = df[df.index >= min_ts]
-
-    # ---------------------------
-    # Main layout
+    # Header Section
     # ---------------------------
     col1, col2 = st.columns([3, 1])
-
+    
     with col1:
-        st.subheader("Trend over time")
-        st.line_chart(df["value"])
-
+        st.markdown('<div class="header-title">🚶 Gait Analysis Dashboard</div>', unsafe_allow_html=True)
+        patient_indicator = "🎭 Demo Mode" if is_demo else f"📡 {patient_name}"
+        st.markdown(f'<div class="subtitle">Real-time pressure sensor analysis and gait metrics • {patient_indicator}</div>', unsafe_allow_html=True)
+    
     with col2:
-        st.subheader("Latest value")
-        latest_timestamp = df.index.max()
-        latest_value = df.loc[latest_timestamp, "value"]
-
-        st.metric(
-            label="Most recent data value",
-            value=f"{latest_value:.2f}",
-            delta=None
-        )
-        st.caption(f"Timestamp: {latest_timestamp}")
-
-        st.subheader("Summary statistics")
-        st.write(
-            df["value"].describe()[["count", "mean", "min", "max"]]
-            .rename({"count": "N", "mean": "Mean", "min": "Min", "max": "Max"})
-        )
+        st.metric("Patient", patient_name if not is_demo else "Demo")
+        st.metric("Status", "🟢 Active")
 
     # ---------------------------
-    # Auto refresh handling
+    # Quick Stats Section
     # ---------------------------
-    if auto_refresh:
-        # Simple auto-refresh trick: rerun after N seconds
-        st.caption(f"Auto-refreshing every {REFRESH_INTERVAL_SECONDS} seconds.")
-        time.sleep(REFRESH_INTERVAL_SECONDS)
-        st.rerun()
+    st.header("📊 System Overview")
+    
+    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+    
+    with stats_col1:
+        st.markdown("""
+            <div class="stat-card">
+                <h3>5</h3>
+                <p>Pressure Points</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with stats_col2:
+        st.markdown("""
+            <div class="stat-card">
+                <h3>10</h3>
+                <p>Total Sensors</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with stats_col3:
+        st.markdown("""
+            <div class="stat-card">
+                <h3>25 Hz</h3>
+                <p>Sampling Rate</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with stats_col4:
+        st.markdown("""
+            <div class="stat-card">
+                <h3>Real-time</h3>
+                <p>Live Updates</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # ---------------------------
+    # Features Section
+    # ---------------------------
+    st.header("✨ Features")
+
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("""
+            <div class="feature-box">
+                <h4>📈 Pressure Analysis</h4>
+                <p>Monitor pressure distribution across all 5 key pressure points (heel, metatarsal heads, pinky toe, big toe) on both feet with Savitzky-Golay filtering for clean signals.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+            <div class="feature-box">
+                <h4>🔄 Left vs Right Comparison</h4>
+                <p>Compare gait symmetry between left and right feet with color-coded trend lines for easy interpretation.</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+            <div class="feature-box">
+                <h4>⚡ Real-time Metrics</h4>
+                <p>Track gait parameters including cadence, stride time, stance/swing ratio, and gait symmetry index in real-time.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+            <div class="feature-box">
+                <h4>📱 Multi-page Dashboard</h4>
+                <p>Navigate through detailed analysis pages, individual metrics, and comprehensive reports with filtered data views.</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+    # ---------------------------
+    # Available Pages Section
+    # ---------------------------
+    st.header("📑 Available Pages")
+    
+    pages_info = {
+        "🏠 Home": {
+            "file": "main_page.py",
+            "description": "Overview and navigation hub (you are here)"
+        },
+        "📊 Pressure Dashboard": {
+            "file": "page_2.py",
+            "description": "Detailed pressure readings with left/right foot comparison, filtered with Savitzky-Golay smoothing"
+        },
+        "🦶 Advanced Gait Analysis": {
+            "file": "page_3.py",
+            "description": "Load distribution analysis, gait symmetry, and pressure timeline visualization"
+        },
+        "📈 Data exploration and metrics": {
+            "file": "page_4.py",
+            "description": "Raw data exploration, correlation analysis, and statistical metrics"
+        },
+    }
+    
+    # Create a nice layout for page navigation
+    for page_name, info in pages_info.items():
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            st.markdown(f"**{page_name}**")
+        with col2:
+            st.markdown(f"*{info['description']}*")
+    
+    st.divider()
+
+    # ---------------------------
+    # System Information Section
+    # ---------------------------
+    st.header("ℹ️ System Information")
+    
+    info_col1, info_col2, info_col3 = st.columns(3)
+    
+    with info_col1:
+        st.metric("Sampling Frequency", "25 Hz")
+    
+    with info_col2:
+        st.metric("Current Time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    
+    with info_col3:
+        st.metric("Data Source", "Cloud API")
+
+    # ---------------------------
+    # Footer
+    # ---------------------------
+    st.divider()
+    st.markdown("""
+        **Gait Analysis Dashboard v1.0** | Powered by Streamlit & FastAPI
+        
+        📧 For support or questions, please contact the development team.
+    """)
 
 
 if __name__ == "__main__":
