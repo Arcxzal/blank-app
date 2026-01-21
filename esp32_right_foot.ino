@@ -13,23 +13,15 @@
  * - Create new patients in the app and use their ID here
  */
 
-// Blynk Configuration (optional - left in but not required)
-#define BLYNK_TEMPLATE_ID "TMPL6-ZsV0hu_"
-#define BLYNK_TEMPLATE_NAME "readRight"
-#define BLYNK_AUTH_TOKEN "qCSvSCCeRSutZIb7CPt4Ppvp0qyEij_o"
-
 // Required Libraries
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include <BlynkSimpleEsp32.h>
-#include <BlynkApiArduino.h>
 
 // WiFi Credentials
-char auth[] = BLYNK_AUTH_TOKEN; // optional for Blynk
-char ssid[] = "se";
-char pass[] = "44448888";
+const char* ssid = "se";
+const char* pass = "44448888";
 
 // Backend API Configuration
 const char* serverUrl = "https://silver-space-umbrella-4j5q5647xwj735gx-8000.app.github.dev/api/pressure";
@@ -62,8 +54,8 @@ uint16_t s5_buf[NUM_SAMPLES];
 uint8_t sampleIndex = 0;
 bool sending = false;
 
-// Timer (BlynkTimer is same as SimpleTimer)
-BlynkTimer timer;
+// Timing variables
+unsigned long lastSampleTime = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -115,13 +107,16 @@ void setup() {
   }
   
   Serial.println("========================================\n");
-  
-  // Schedule sampling at 25 Hz
-  timer.setInterval(sampleInterval, readSensor);
 }
 
 void loop() {
-  timer.run();
+  unsigned long currentTime = millis();
+  
+  // Sample sensors at defined interval
+  if (currentTime - lastSampleTime >= sampleInterval) {
+    lastSampleTime = currentTime;
+    readSensor();
+  }
   
   // When buffer is full, send data
   if (sampleIndex >= NUM_SAMPLES && !sending) {
