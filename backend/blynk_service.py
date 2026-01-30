@@ -66,13 +66,14 @@ class BlynkService:
         """
         ratings = {}
         
-        # Define sensor thresholds (based on your page_6.py analysis)
+        # Define sensor thresholds (empirically calibrated from real walk data)
+        # Q1/Q3 based on observed pressure distribution
         thresholds = {
-            'bigToe': {'weak': 8, 'high': 45},
-            'pinkyToe': {'weak': 5, 'high': 40},
-            'metaOut': {'weak': 20, 'high': 50},
-            'metaIn': {'weak': 20, 'high': 50},
-            'heel': {'weak': 15, 'high': 55}
+            'bigToe': {'weak': 594, 'high': 594},              # Single mode: only saw high contact
+            'pinkyToe': {'weak': 1364, 'high': 1701},          # Primary load area
+            'metaOut': {'weak': 1301, 'high': 1301},           # Stable mid-foot
+            'metaIn': {'weak': 184, 'high': 395},              # Variable inner forefoot
+            'heel': {'weak': 611, 'high': 611}                 # Consistent heel contact
         }
         
         for sensor, limits in thresholds.items():

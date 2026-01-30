@@ -1,14 +1,21 @@
-# backend/main.py
+# backend/app_main.py
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
-from . import models, schemas
-from .database import SessionLocal, engine
+import sys
+import os
+
+# Add backend directory to path for proper imports
+sys.path.insert(0, os.path.dirname(__file__))
+
+from models import Base, Patient, PressureSample
+from schemas import PatientResponse, PatientCreate, Payload, Sample, PressureSet, SimpleReading
+from database import SessionLocal, engine
 from typing import List, Dict
 import pandas as pd
-from .blynk_http_service import get_blynk_http_service
+from blynk_http_service import get_blynk_http_service
 
 # Create DB tables
-models.Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ESP32 Pressure API")
 
@@ -21,7 +28,12 @@ def get_db():
         db.close()
 
 @app.post("/api/pressure", status_code=201)
-async def receive(payload: schemas.Payload, background_tasks: BackgroundTasks, patient_id: int = None, db: Session = Depends(get_db)):
+async def receive(payload: Payload, background_tasks: BackgroundTasks, patient_id: int = None, db: Session = Depends(get_db)):
+    """
+    Accept pressure data from ESP32 devices (left or right foot, or both).
+    If data arrives from only one foot, it's stored as-is.
+    The frontend will combine matching timestamps when displaying.
+    """
     # Accept multiple payload shapes. Use `get_readings()` to normalize.
     readings = []
     try:
@@ -34,7 +46,7 @@ async def receive(payload: schemas.Payload, background_tasks: BackgroundTasks, p
 
     rows = []
     for r in readings:
-        row = models.PressureSample(
+        row = PressureSample(
             device_id=payload.device_id,
             patient_id=patient_id,  # Associate with patient
             timestamp=r.timestamp,
@@ -66,15 +78,15 @@ async def receive(payload: schemas.Payload, background_tasks: BackgroundTasks, p
 
     return {"status": "ok", "inserted": len(rows)}
 
-@app.get("/api/readings", response_model=List[schemas.Sample])
+@app.get("/api/readings", response_model=List[Sample])
 def get_readings(limit: int = 50, patient_id: int = None, db: Session = Depends(get_db)):
-    q = db.query(models.PressureSample)
+    q = db.query(PressureSample)
     
     # Filter by patient_id if provided
     if patient_id is not None:
-        q = q.filter(models.PressureSample.patient_id == patient_id)
+        q = q.filter(PressureSample.patient_id == patient_id)
     
-    q = q.order_by(models.PressureSample.timestamp.desc()).limit(limit)
+    q = q.order_by(PressureSample.timestamp.desc()).limit(limit)
     results = list(q)
     results.reverse()  # chronological order
 
@@ -82,9 +94,9 @@ def get_readings(limit: int = 50, patient_id: int = None, db: Session = Depends(
     response = []
     for r in results:
         response.append(
-            schemas.Sample(
+            Sample(
                 timestamp=r.timestamp,
-                pressures=schemas.PressureSet(
+                pressures=PressureSet(
                     # Right foot
                     bigToe=r.big_toe,
                     pinkyToe=r.pinky_toe,
@@ -104,10 +116,10 @@ def get_readings(limit: int = 50, patient_id: int = None, db: Session = Depends(
     return response
 
 
-@app.get("/api/readings/compact", response_model=List[schemas.SimpleReading])
+@app.get("/api/readings/compact", response_model=List[SimpleReading])
 def get_readings_compact(limit: int = 50, db: Session = Depends(get_db)):
     """Return the last `limit` readings in compact format: timestamp (int) and s1..s5."""
-    q = db.query(models.PressureSample).order_by(models.PressureSample.timestamp.desc()).limit(limit)
+    q = db.query(PressureSample).order_by(PressureSample.timestamp.desc()).limit(limit)
     results = list(q)
     results.reverse()
 
@@ -116,7 +128,7 @@ def get_readings_compact(limit: int = 50, db: Session = Depends(get_db)):
         # timestamp as integer seconds since epoch
         ts = int(r.timestamp.timestamp()) if r.timestamp is not None else 0
         response.append(
-            schemas.SimpleReading(
+            SimpleReading(
                 timestamp=ts,
                 # Right foot
                 s1=r.big_toe,
@@ -142,7 +154,7 @@ def get_gait_metrics(limit: int = 100, db: Session = Depends(get_db)) -> Dict:
     Also sends data to Blynk automatically.
     """
     # Fetch recent readings
-    q = db.query(models.PressureSample).order_by(models.PressureSample.timestamp.desc()).limit(limit)
+    q = db.query(PressureSample).order_by(models.PressureSample.timestamp.desc()).limit(limit)
     results = list(q)
     
     if not results:
@@ -189,13 +201,13 @@ def auto_update_blynk(limit: int = 100, patient_id: int = None):
         db = SessionLocal()
         
         # Fetch recent readings
-        q = db.query(models.PressureSample)
+        q = db.query(PressureSample)
         
         # Filter by patient if provided
         if patient_id is not None:
-            q = q.filter(models.PressureSample.patient_id == patient_id)
+            q = q.filter(PressureSample.patient_id == patient_id)
         
-        q = q.order_by(models.PressureSample.timestamp.desc()).limit(limit)
+        q = q.order_by(PressureSample.timestamp.desc()).limit(limit)
         results = list(q)
         
         if not results or len(results) < 50:  # Need minimum data for analysis
@@ -241,7 +253,7 @@ async def update_blynk(limit: int = 100, db: Session = Depends(get_db)) -> Dict:
     """
     try:
         # Fetch recent readings
-        q = db.query(models.PressureSample).order_by(models.PressureSample.timestamp.desc()).limit(limit)
+        q = db.query(PressureSample).order_by(PressureSample.timestamp.desc()).limit(limit)
         results = list(q)
         
         if not results:
@@ -286,16 +298,16 @@ async def update_blynk(limit: int = 100, db: Session = Depends(get_db)) -> Dict:
 
 # Patient Management Endpoints
 
-@app.get("/api/patients", response_model=List[schemas.PatientResponse])
+@app.get("/api/patients", response_model=List[PatientResponse])
 def get_patients(db: Session = Depends(get_db)):
     """Get all patients"""
-    patients = db.query(models.Patient).order_by(models.Patient.created_at.desc()).all()
+    patients = db.query(Patient).order_by(Patient.created_at.desc()).all()
     return patients
 
-@app.post("/api/patients", response_model=schemas.PatientResponse, status_code=201)
-def create_patient(patient: schemas.PatientCreate, db: Session = Depends(get_db)):
+@app.post("/api/patients", response_model=PatientResponse, status_code=201)
+def create_patient(patient: PatientCreate, db: Session = Depends(get_db)):
     """Create a new patient"""
-    db_patient = models.Patient(
+    db_patient = Patient(
         name=patient.name,
         age=patient.age,
         notes=patient.notes
@@ -305,10 +317,10 @@ def create_patient(patient: schemas.PatientCreate, db: Session = Depends(get_db)
     db.refresh(db_patient)
     return db_patient
 
-@app.get("/api/patients/{patient_id}", response_model=schemas.PatientResponse)
+@app.get("/api/patients/{patient_id}", response_model=PatientResponse)
 def get_patient(patient_id: int, db: Session = Depends(get_db)):
     """Get a specific patient by ID"""
-    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    patient = db.query(Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient
@@ -316,14 +328,148 @@ def get_patient(patient_id: int, db: Session = Depends(get_db)):
 @app.delete("/api/patients/{patient_id}")
 def delete_patient(patient_id: int, db: Session = Depends(get_db)):
     """Delete a patient and all their pressure samples"""
-    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     
     # Delete all pressure samples for this patient
-    db.query(models.PressureSample).filter(models.PressureSample.patient_id == patient_id).delete()
+    db.query(PressureSample).filter(PressureSample.patient_id == patient_id).delete()
     
     # Delete the patient
     db.delete(patient)
     db.commit()
     return {"status": "deleted", "patient_id": patient_id}
+@app.get("/api/blynk/webhook/button")
+async def blynk_button_webhook(v10: int = 0, patient_id: int = 1, db: Session = Depends(get_db)) -> Dict:
+    """
+    Webhook endpoint for Blynk button press.
+    
+    When button on V10 is pressed, Blynk sends value=1.
+    This endpoint fetches latest gait metrics and sends evaluation notification.
+    
+    Configure in Blynk app:
+    - Button Widget on Virtual Pin V10
+    - No HTTP Request action needed - Blynk automatically calls this webhook when V10 changes
+    
+    Args:
+        v10: Button state (1=pressed/ON, 0=released/OFF)
+        patient_id: Patient ID to send notification for (default: 1)
+        
+    Returns:
+        {"success": True/False, "message": "...", "button_state": 1/0}
+    """
+    try:
+        # Only process when button is pressed (value = 1)
+        if v10 != 1:
+            return {
+                "success": False,
+                "message": "Button released (0) - notification only sent on press (1)",
+                "button_state": v10
+            }
+        
+        # Get patient info
+        patient = db.query(Patient).filter(Patient.id == patient_id).first()
+        if not patient:
+            return {
+                "success": False,
+                "message": f"Patient ID {patient_id} not found",
+                "button_state": v10
+            }
+        
+        # Fetch latest gait metrics from recent data
+        q = db.query(PressureSample).filter(PressureSample.patient_id == patient_id)
+        q = q.order_by(PressureSample.timestamp.desc()).limit(100)
+        results = list(q)
+        
+        if not results or len(results) < 50:
+            return {
+                "success": False,
+                "message": "Not enough data to generate evaluation report (need at least 50 samples)",
+                "button_state": v10
+            }
+        
+        results.reverse()
+        
+        # Convert to DataFrame and calculate metrics
+        data = []
+        for r in results:
+            data.append({
+                'timestamp': r.timestamp,
+                'bigToe': r.big_toe,
+                'pinkyToe': r.pinky_toe,
+                'metaOut': r.meta_out,
+                'metaIn': r.meta_in,
+                'heel': r.heel,
+                'bigToe_L': r.big_toe_l or 0.0,
+                'pinkyToe_L': r.pinky_toe_l or 0.0,
+                'metaOut_L': r.meta_out_l or 0.0,
+                'metaIn_L': r.meta_in_l or 0.0,
+                'heel_L': r.heel_l or 0.0,
+            })
+        
+        df = pd.DataFrame(data)
+        
+        # Get Blynk service and calculate metrics
+        blynk_service = get_blynk_http_service()
+        result = blynk_service.process_and_send(df)
+        
+        metrics = result.get('metrics', {})
+        cadence = metrics.get('cadence', 0)
+        step_symmetry = metrics.get('step_symmetry', 0)
+        stance_time = metrics.get('stance_time', 0)
+        
+        # Determine evaluation status based on metrics
+        if cadence < 60 or step_symmetry < 60:
+            status = "CRITICAL"
+            action_plan = [
+                "Cadence is below normal (target: 90-120 steps/min)",
+                "Schedule immediate consultation",
+                "Review gait pattern with physical therapist"
+            ]
+        elif cadence < 90 or step_symmetry < 75:
+            status = "NEEDS_ATTENTION"
+            action_plan = [
+                "Work on improving cadence (current: {:.1f}, target: 90-120)".format(cadence),
+                "Focus on gait symmetry exercises (current: {:.1f}%, target: >85%)".format(step_symmetry),
+                "Follow up within 2 weeks"
+            ]
+        else:
+            status = "GOOD"
+            action_plan = [
+                "Maintain current walking routine",
+                "Continue regular monitoring",
+                "Next evaluation in 1 month"
+            ]
+        
+        # Prepare evaluation summary
+        evaluation_summary = {
+            'status': status,
+            'cadence': cadence,
+            'step_symmetry': step_symmetry,
+            'stance_time': stance_time,
+            'action_plan': action_plan
+        }
+        
+        # Send notification via Blynk
+        notification_sent = blynk_service.send_evaluation_report(patient.name, evaluation_summary)
+        
+        return {
+            "success": notification_sent,
+            "message": "Evaluation report sent to patient" if notification_sent else "Failed to send notification",
+            "button_state": v10,
+            "patient_id": patient_id,
+            "evaluation": {
+                "status": status,
+                "cadence": round(cadence, 1),
+                "step_symmetry": round(step_symmetry, 1),
+                "stance_time": round(stance_time, 2)
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error in button webhook: {e}")
+        return {
+            "success": False,
+            "message": f"Error: {str(e)}",
+            "button_state": v10
+        }

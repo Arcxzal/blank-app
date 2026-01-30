@@ -5,6 +5,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from mock_data_generator import generate_mock_data
+import pytz
 
 # Backend API URL
 API_URL = "https://silver-space-umbrella-4j5q5647xwj735gx-8000.app.github.dev"
@@ -84,6 +85,8 @@ def load_patient_data(num_cycles=20, cadence=115):
             df = pd.DataFrame(records)
             df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
             df = df.dropna(subset=["timestamp"])
+            # Convert UTC to Singapore timezone (GMT+8)
+            df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Singapore')
             df = df.sort_values("timestamp")
             return df
             

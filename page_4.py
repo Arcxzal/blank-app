@@ -9,6 +9,7 @@ import requests
 from datetime import datetime
 from patient_utils import load_patient_data, is_demo_patient, get_patient_display_name
 from mock_data_generator import generate_mock_data
+import pytz
 
 # ---------------------------
 # Configuration
@@ -54,13 +55,15 @@ def load_data_from_api() -> pd.DataFrame:
     df = pd.DataFrame(records)
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
     df = df.dropna(subset=["timestamp"])
+    # Keep UTC timezone - matches ESP32 NTP timestamps from backend
     df = df.sort_values("timestamp")
     return df
 
 
 def load_mock_data() -> pd.DataFrame:
-    start_date = datetime.now() - pd.Timedelta(hours=1)  # Start from 1 hour ago
-    rng = pd.date_range(start_date, periods=300, freq="10s")
+    import pytz
+    start_date = datetime.now(pytz.UTC) - pd.Timedelta(hours=1)  # Start from 1 hour ago (UTC)
+    rng = pd.date_range(start_date, periods=300, freq="10s", tz='UTC')
     df = pd.DataFrame({
         "timestamp": rng,
         "bigToe": np.abs(np.sin(np.linspace(0, 30, len(rng))) * 40 + np.random.randn(len(rng)) * 3),
@@ -75,6 +78,83 @@ def load_mock_data() -> pd.DataFrame:
         "heel_L": np.abs(np.sin(np.linspace(0, 32, len(rng)) + 0.5) * 45 + np.random.randn(len(rng)) * 3),
     })
     return df
+
+
+def merge_left_right_foot_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Intelligently merge left and right foot readings from separate ESP32s.
+    Matches timestamps within 1 second and combines data into single rows.
+    """
+    if df.empty:
+        return df
+    
+    # Create a working copy
+    result_rows = []
+    used_indices = set()
+    
+    for idx, row in df.iterrows():
+        if idx in used_indices:
+            continue
+        
+        current_row = row.copy()
+        current_ts = row['timestamp']
+        
+        # Check if this row has data for only one foot
+        right_has_data = (row['bigToe'] > 0 or row['pinkyToe'] > 0 or 
+                         row['metaOut'] > 0 or row['metaIn'] > 0 or row['heel'] > 0)
+        left_has_data = (row['bigToe_L'] > 0 or row['pinkyToe_L'] > 0 or 
+                        row['metaOut_L'] > 0 or row['metaIn_L'] > 0 or row['heel_L'] > 0)
+        
+        # If this row has only right foot data, look for matching left foot data
+        if right_has_data and not left_has_data:
+            for other_idx in range(idx + 1, min(idx + 10, len(df))):
+                if other_idx in used_indices:
+                    continue
+                other_row = df.iloc[other_idx]
+                time_diff = abs((other_row['timestamp'] - current_ts).total_seconds())
+                
+                if time_diff <= 1.0:
+                    other_right = (other_row['bigToe'] > 0 or other_row['pinkyToe'] > 0 or 
+                                  other_row['metaOut'] > 0 or other_row['metaIn'] > 0 or other_row['heel'] > 0)
+                    other_left = (other_row['bigToe_L'] > 0 or other_row['pinkyToe_L'] > 0 or 
+                                 other_row['metaOut_L'] > 0 or other_row['metaIn_L'] > 0 or other_row['heel_L'] > 0)
+                    
+                    if other_left and not other_right:
+                        current_row['bigToe_L'] = other_row['bigToe_L']
+                        current_row['pinkyToe_L'] = other_row['pinkyToe_L']
+                        current_row['metaOut_L'] = other_row['metaOut_L']
+                        current_row['metaIn_L'] = other_row['metaIn_L']
+                        current_row['heel_L'] = other_row['heel_L']
+                        used_indices.add(other_idx)
+                        break
+        
+        # If this row has only left foot data, look for matching right foot data
+        elif left_has_data and not right_has_data:
+            for other_idx in range(idx + 1, min(idx + 10, len(df))):
+                if other_idx in used_indices:
+                    continue
+                other_row = df.iloc[other_idx]
+                time_diff = abs((other_row['timestamp'] - current_ts).total_seconds())
+                
+                if time_diff <= 1.0:
+                    other_right = (other_row['bigToe'] > 0 or other_row['pinkyToe'] > 0 or 
+                                  other_row['metaOut'] > 0 or other_row['metaIn'] > 0 or other_row['heel'] > 0)
+                    other_left = (other_row['bigToe_L'] > 0 or other_row['pinkyToe_L'] > 0 or 
+                                 other_row['metaOut_L'] > 0 or other_row['metaIn_L'] > 0 or other_row['heel_L'] > 0)
+                    
+                    if other_right and not other_left:
+                        current_row['bigToe'] = other_row['bigToe']
+                        current_row['pinkyToe'] = other_row['pinkyToe']
+                        current_row['metaOut'] = other_row['metaOut']
+                        current_row['metaIn'] = other_row['metaIn']
+                        current_row['heel'] = other_row['heel']
+                        used_indices.add(other_idx)
+                        break
+        
+        result_rows.append(current_row)
+        used_indices.add(idx)
+    
+    return pd.DataFrame(result_rows) if result_rows else df
 
 
 # ---------------------------

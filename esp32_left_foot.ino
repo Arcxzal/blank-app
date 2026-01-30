@@ -35,6 +35,16 @@ const char* deviceID = "ESP32_LEFT_FOOT";  // Left foot device identifier
 // - Or create a new patient in the app and use that ID
 const int patientID = 1;  // Change this to match your patient
 
+// Timezone Configuration (seconds offset from UTC)
+// Common timezones:
+//   UTC:  0           PST/PDT: -28800 or -25200
+//   EST/EDT: -18000 or -14400
+//   CST/CDT: -21600 or -19800
+//   MST/MDT: -25200 or -21600
+//   GMT+8 (Singapore): +28800
+const long TIMEZONE_OFFSET = 28800;   // Singapore Standard Time (UTC+8)
+const int DST_OFFSET = 0;             // Singapore does not observe DST
+
 // LEFT FOOT Sensor pins (configure based on your hardware)
 #define bigToePin 34        // s6 - Left Big Toe
 #define pinkyToePin 35      // s7 - Left Pinky Toe
@@ -45,14 +55,30 @@ const int patientID = 1;  // Change this to match your patient
 // Sampling Configuration
 #define sampleInterval 40      // ms (25 Hz sampling rate)
 #define NUM_SAMPLES 25         // Number of samples to buffer before sending
+#define OVERSAMPLES 7          // Number of readings to average per sample (increased for stability)
+#define ADC_MAX 4095           // Maximum valid ADC reading (12-bit)
+#define ADC_SANITY 3500        // Readings above this are likely noise/floating
+
+// Dual buffering for continuous sampling during sending
 unsigned long timestamps[NUM_SAMPLES];
 uint16_t s6_buf[NUM_SAMPLES];
 uint16_t s7_buf[NUM_SAMPLES];
 uint16_t s8_buf[NUM_SAMPLES];
 uint16_t s9_buf[NUM_SAMPLES];
 uint16_t s10_buf[NUM_SAMPLES];
+
+// Secondary buffer for data to send (swapped when primary is full)
+unsigned long timestamps_send[NUM_SAMPLES];
+uint16_t s6_send[NUM_SAMPLES];
+uint16_t s7_send[NUM_SAMPLES];
+uint16_t s8_send[NUM_SAMPLES];
+uint16_t s9_send[NUM_SAMPLES];
+uint16_t s10_send[NUM_SAMPLES];
+
 uint8_t sampleIndex = 0;
 bool sending = false;
+HTTPClient http;  // Keep HTTP client persistent to avoid reallocation
+bool http_in_use = false;
 
 // Timing variables
 unsigned long lastSampleTime = 0;
@@ -89,7 +115,8 @@ void setup() {
   Serial.println(patientID);
   
   // Start NTP (UTC). We'll wait briefly for time to be obtained.
-  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  // configTime(timezone_offset, dst_offset, server1, server2)
+  configTime(TIMEZONE_OFFSET, DST_OFFSET, "pool.ntp.org", "time.google.com");
   Serial.print("Waiting for NTP time");
   time_t now = time(nullptr);
   unsigned long start = millis();
@@ -112,30 +139,54 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
   
-  // Sample sensors at defined interval
+  // Sample sensors at defined interval (ALWAYS do this, never skip)
   if (currentTime - lastSampleTime >= sampleInterval) {
     lastSampleTime = currentTime;
     readSensor();
   }
   
-  // When buffer is full, send data
+  // When buffer is full, initiate async send (doesn't block sampling)
   if (sampleIndex >= NUM_SAMPLES && !sending) {
     sending = true;
-    sendData();
+    initiateAsyncSend();
+  }
+  
+  // Check if async send is complete and send next batch
+  if (sending && !http_in_use) {
+    sending = false;
   }
 }
 
 /**
  * Sampling function - called at 25 Hz (every 40ms)
- * Reads all sensors and buffers the raw values
+ * Reads all sensors with averaging and spike rejection
  */
 void readSensor() {
   unsigned long ts = millis();
-  uint16_t v6 = analogRead(bigToePin);
-  uint16_t v7 = analogRead(pinkyToePin);
-  uint16_t v8 = analogRead(metaHeadOutPin);
-  uint16_t v9 = analogRead(metaHeadInPin);
-  uint16_t v10 = analogRead(heelPin);
+  
+  // Oversample each sensor and average to reduce noise
+  uint32_t sum6 = 0, sum7 = 0, sum8 = 0, sum9 = 0, sum10 = 0;
+  for (int i = 0; i < OVERSAMPLES; i++) {
+    sum6 += analogRead(bigToePin);
+    sum7 += analogRead(pinkyToePin);
+    sum8 += analogRead(metaHeadOutPin);
+    sum9 += analogRead(metaHeadInPin);
+    sum10 += analogRead(heelPin);
+    delayMicroseconds(100);  // Small delay between readings
+  }
+  
+  uint16_t v6 = sum6 / OVERSAMPLES;
+  uint16_t v7 = sum7 / OVERSAMPLES;
+  uint16_t v8 = sum8 / OVERSAMPLES;
+  uint16_t v9 = sum9 / OVERSAMPLES;
+  uint16_t v10 = sum10 / OVERSAMPLES;
+  
+  // Sanity check - if reading is unreasonably high, it's noise (floating pin)
+  if (v6 > ADC_SANITY) v6 = 0;
+  if (v7 > ADC_SANITY) v7 = 0;
+  if (v8 > ADC_SANITY) v8 = 0;
+  if (v9 > ADC_SANITY) v9 = 0;
+  if (v10 > ADC_SANITY) v10 = 0;
 
   Serial.printf("%lu,%u,%u,%u,%u,%u\n", ts, v6, v7, v8, v9, v10);
 
@@ -151,21 +202,57 @@ void readSensor() {
 }
 
 /**
- * Send compact readings JSON to backend
- * Format: device_id + readings[] with {timestamp (epoch seconds), s1..s10}
+ * Initiate async send - copies buffer and starts non-blocking send
+ * This allows sampling to continue while HTTP request is in flight
+ * Also filters out all-zero readings to reduce noise
  */
-void sendData() {
-  if (sampleIndex < NUM_SAMPLES) {
-    sending = false;
-    return;
-  }
+void initiateAsyncSend() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected, skipping send");
-    sending = false;
+    sampleIndex = 0;  // Still reset buffer to prevent zeros
+    return;
+  }
+
+  // Check if buffer contains meaningful data (not all zeros)
+  // This prevents sending useless "standing still" data
+  bool hasData = false;
+  for (int i = 0; i < NUM_SAMPLES; i++) {
+    if (s6_buf[i] > 0 || s7_buf[i] > 0 || s8_buf[i] > 0 || 
+        s9_buf[i] > 0 || s10_buf[i] > 0) {
+      hasData = true;
+      break;
+    }
+  }
+
+  // If all zeros, discard this batch silently
+  if (!hasData) {
+    Serial.println("Buffer contains only zeros - skipping send (standing still)");
     sampleIndex = 0;
     return;
   }
 
+  // Copy current buffer to send buffer (fast operation)
+  memcpy(timestamps_send, timestamps, sizeof(timestamps));
+  memcpy(s6_send, s6_buf, sizeof(s6_buf));
+  memcpy(s7_send, s7_buf, sizeof(s7_buf));
+  memcpy(s8_send, s8_buf, sizeof(s8_buf));
+  memcpy(s9_send, s9_buf, sizeof(s9_buf));
+  memcpy(s10_send, s10_buf, sizeof(s10_buf));
+
+  // Reset collection buffer immediately so sampling continues
+  sampleIndex = 0;
+
+  // Now send (this will block, but buffer is already reset)
+  sendDataBlocking();
+}
+
+/**
+ * Send compact readings JSON to backend
+ * Format: device_id + readings[] with {timestamp (epoch seconds), s1..s10}
+ */
+void sendDataBlocking() {
+  http_in_use = true;
+  
   // Get current epoch and millis to map stored millis -> epoch seconds
   time_t epochNow = time(nullptr);
   unsigned long millisNow = millis();
@@ -181,11 +268,11 @@ void sendData() {
     // If NTP unavailable (epochNow < reasonable), fallback to sending millis delta (not epoch)
     long ts_sec;
     if (epochNow >= 1600000000L) {
-      long delta_ms = (long)(millisNow - timestamps[i]); // millisNow is >= timestamps[i]
+      long delta_ms = (long)(millisNow - timestamps_send[i]); // millisNow is >= timestamps_send[i]
       ts_sec = (long)epochNow - (delta_ms / 1000L);
     } else {
       // Fallback: send device-relative seconds since boot (rounded)
-      ts_sec = timestamps[i] / 1000UL;
+      ts_sec = timestamps_send[i] / 1000UL;
     }
 
     r["timestamp"] = ts_sec;
@@ -198,19 +285,17 @@ void sendData() {
     r["s5"] = 0;
     
     // LEFT FOOT sensors (s6-s10) - raw analog values
-    r["s6"] = s6_buf[i];
-    r["s7"] = s7_buf[i];
-    r["s8"] = s8_buf[i];
-    r["s9"] = s9_buf[i];
-    r["s10"] = s10_buf[i];
+    r["s6"] = s6_send[i];
+    r["s7"] = s7_send[i];
+    r["s8"] = s8_send[i];
+    r["s9"] = s9_send[i];
+    r["s10"] = s10_send[i];
   }
 
   String payload;
   serializeJson(doc, payload);
   Serial.print("Sending LEFT FOOT data: ");
   Serial.println(payload);
-
-  HTTPClient http;
   
   // Add patient_id as query parameter
   String url = String(serverUrl) + "?patient_id=" + String(patientID);
@@ -229,7 +314,5 @@ void sendData() {
   }
   http.end();
 
-  // Reset buffer
-  sampleIndex = 0;
-  sending = false;
+  http_in_use = false;
 }

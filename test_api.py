@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import pytz
 
 # Backend API URL
 API_URL = "https://silver-space-umbrella-4j5q5647xwj735gx-8000.app.github.dev"
@@ -46,6 +47,8 @@ def fetch_df(patient_id: int = None, api_url: str = API_URL) -> pd.DataFrame:
     # Force proper datetime dtype and drop invalid rows
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
     df = df.dropna(subset=["timestamp"])
+    # Convert UTC to Singapore timezone (GMT+8)
+    df["timestamp"] = df["timestamp"].dt.tz_convert('Asia/Singapore')
 
     return df
 

@@ -21,7 +21,7 @@ from processing import (
 
 # Blynk Configuration
 BLYNK_AUTH_TOKEN = "qCSvSCCeRSutZIb7CPt4Ppvp0qyEij_o"
-BLYNK_HTTP_API = "https://blynk.cloud/external/api"
+BLYNK_HTTP_API = "https://sgp1.blynk.cloud/external/api"  # Singapore server
 
 # Virtual Pin Assignments
 PIN_BIGTOE_RATING = 0       # V0
@@ -33,6 +33,7 @@ PIN_CADENCE = 5             # V5
 PIN_STEP_TIME = 6           # V6
 PIN_STANCE_TIME = 7         # V7
 PIN_STEP_SYMMETRY = 8       # V8
+PIN_GAIT_BALANCE = 9        # V9 - Biphasic L/R pressure balance (-100 to +100)
 
 class BlynkHttpService:
     """Service to calculate gait metrics and send to Blynk via HTTP API"""
@@ -144,17 +145,23 @@ class BlynkHttpService:
             # Compute metrics
             metrics = compute_gait_metrics(heel_strikes, toe_offs)
             
-            # Calculate step symmetry
+            # Calculate step symmetry and gait balance
             right_cols = ['bigToe', 'pinkyToe', 'metaOut', 'metaIn', 'heel']
             left_cols = ['bigToe_L', 'pinkyToe_L', 'metaOut_L', 'metaIn_L', 'heel_L']
             
             step_symmetry = 0.0
+            gait_balance = 0.0
             if all(col in df.columns for col in right_cols + left_cols):
                 right_total = df[right_cols].sum(axis=1).mean()
                 left_total = df[left_cols].sum(axis=1).mean()
                 
                 if max(right_total, left_total) > 0:
                     step_symmetry = 100 - abs(right_total - left_total) / max(right_total, left_total) * 100
+                
+                # Biphasic gait balance: positive = left foot dominant, negative = right foot dominant
+                total_pressure = left_total + right_total
+                if total_pressure > 0:
+                    gait_balance = ((left_total - right_total) / total_pressure) * 100
             
             # Extract scalar values
             cadence = metrics.get('cadence', 0.0)
@@ -180,7 +187,8 @@ class BlynkHttpService:
                 'cadence': float(cadence),
                 'step_time': float(step_time),
                 'stance_time': float(avg_stance),
-                'step_symmetry': float(step_symmetry)
+                'step_symmetry': float(step_symmetry),
+                'gait_balance': float(gait_balance)
             }
             
         except Exception as e:
@@ -189,7 +197,8 @@ class BlynkHttpService:
                 'cadence': 0.0,
                 'swing_time': 0.0,
                 'stance_time': 0.0,
-                'step_symmetry': 0.0
+                'step_symmetry': 0.0,
+                'gait_balance': 0.0
             }
     
     def send_to_blynk(self, ratings: Dict[str, str], metrics: Dict[str, float]) -> bool:
@@ -213,6 +222,7 @@ class BlynkHttpService:
                 (PIN_STEP_TIME, round(metrics.get('step_time', 0.0), 2)),
                 (PIN_STANCE_TIME, round(metrics.get('stance_time', 0.0), 2)),
                 (PIN_STEP_SYMMETRY, round(metrics.get('step_symmetry', 0.0), 1)),
+                (PIN_GAIT_BALANCE, round(metrics.get('gait_balance', 0.0), 1)),
                 (PIN_BIGTOE_RATING, ratings.get('bigToe', 'Normal')),
                 (PIN_PINKYTOE_RATING, ratings.get('pinkyToe', 'Normal')),
                 (PIN_METAOUT_RATING, ratings.get('metaOut', 'Normal')),
@@ -231,15 +241,99 @@ class BlynkHttpService:
                 except:
                     pass
             
-            if success_count >= 4:  # At least the key metrics sent
-                print(f"✓ Sent to Blynk ({success_count}/9) - Cadence: {metrics.get('cadence', 0):.1f}, Symmetry: {metrics.get('step_symmetry', 0):.1f}%")
+            if success_count >= 5:  # At least the key metrics sent
+                print(f"✓ Sent to Blynk ({success_count}/10) - Cadence: {metrics.get('cadence', 0):.1f}, Balance: {metrics.get('gait_balance', 0):.1f}")
                 return True
             else:
-                print(f"⚠ Partial send to Blynk ({success_count}/9 values)")
+                print(f"⚠ Partial send to Blynk ({success_count}/10 values)")
                 return False
             
         except Exception as e:
             print(f"✗ Failed to send to Blynk: {e}")
+            return False
+    
+    def send_notification(self, title: str, message: str) -> bool:
+        """
+        Send a mobile push notification via Blynk's logEvent API.
+        This sends an actual push notification to the user's phone.
+        
+        Note: You must create an event named "gait_evaluation" in Blynk Console:
+        1. Go to https://blynk.cloud
+        2. Navigate to Settings > Events
+        3. Create event with code "gait_evaluation"
+        
+        Args:
+            title: Notification title (not used by logEvent, but kept for compatibility)
+            message: Notification message body (limited to 255 characters)
+            
+        Returns:
+            True if notification sent successfully, False otherwise
+        """
+        try:
+            # Truncate message to 255 characters (Blynk limit)
+            short_message = message[:255] if len(message) > 255 else message
+            
+            # Use Blynk's logEvent API for mobile push notifications
+            # Event code must be created in Blynk Console first
+            url = f"{self.api_url}/logEvent?token={self.auth_token}&code=gait_evaluation&description={short_message}"
+            
+            response = requests.get(url, timeout=5)
+            
+            if response.status_code in [200, 202, 204]:
+                print(f"✓ Mobile notification sent: {short_message[:50]}...")
+                return True
+            else:
+                print(f"⚠ Notification failed ({response.status_code}): {response.text}")
+                print(f"   Make sure event 'gait_evaluation' exists in Blynk Console")
+                return False
+                
+        except requests.Timeout:
+            print(f"✗ Notification request timed out")
+            return False
+        except Exception as e:
+            print(f"✗ Failed to send notification: {e}")
+            return False
+    
+    def send_evaluation_report(self, patient_name: str, evaluation_summary: Dict) -> bool:
+        """
+        Send a concise evaluation report as a mobile push notification.
+        Message is kept under 255 characters for Blynk compatibility.
+        
+        Args:
+            patient_name: Patient name for the report
+            evaluation_summary: Dictionary with evaluation data:
+                - status: "GOOD", "NEEDS_ATTENTION", "CRITICAL"
+                - cadence: Cadence value
+                - step_symmetry: Step symmetry percentage
+                - stance_time: Stance time
+                - action_plan: List of action items (optional)
+                
+        Returns:
+            True if notification sent, False otherwise
+        """
+        try:
+            # Extract data with defaults
+            status = evaluation_summary.get('status', 'PENDING')
+            cadence = evaluation_summary.get('cadence', 0)
+            symmetry = evaluation_summary.get('step_symmetry', 0)
+            stance_time = evaluation_summary.get('stance_time', 0)
+            
+            # Format emoji based on status
+            status_emoji = {
+                'GOOD': '✅',
+                'NEEDS_ATTENTION': '⚠️',
+                'CRITICAL': '🔴',
+                'PENDING': 'ℹ️'
+            }.get(status, '📋')
+            
+            # Create short, concise message (under 255 chars)
+            message = f"{status_emoji} {patient_name}: {status}\nCadence: {cadence:.1f} spm | Symmetry: {symmetry:.1f}% | Stance: {stance_time:.2f}s"
+            
+            # Send via Blynk notification
+            return self.send_notification("Gait Evaluation", message)
+            
+        except Exception as e:
+            print(f"✗ Failed to generate evaluation report: {e}")
             return False
     
     def process_and_send(self, df: pd.DataFrame) -> Dict:
